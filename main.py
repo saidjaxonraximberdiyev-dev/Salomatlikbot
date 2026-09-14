@@ -506,3 +506,58 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+# Kuryer bot uchun /start buyrug'i
+@courier_bot.message_handler(commands=["start"])
+async def courier_start(message):
+  await courier_bot.send_message(
+      message.chat.id,
+      "🚚 **Kuryer botga xush kelibsiz!**\n\n"
+      "Yangi buyurtmalar shu yerga keladi va ularni qabul qilishingiz mumkin.",
+      parse_mode="Markdown",
+      reply_markup=get_courier_menu(),
+  )
+
+
+# Kuryer buyurtmani qabul qilishi
+@courier_bot.callback_query_handler(func=lambda call: call.data.startswith('accept_'))
+async def courier_accept_order(call):
+  try:
+    order_id = int(call.data.split('_')[1])
+  except (IndexError, ValueError):
+    await courier_bot.answer_callback_query(call.id, "Xatolik yuz berdi!")
+    return
+
+  conn = get_db()
+  cursor = conn.cursor()
+  cursor.execute(
+      "UPDATE orders SET status = 'Yo''lda', courier_id = ? WHERE id = ?",
+      (call.from_user.id, order_id),
+  )
+  conn.commit()
+
+  # Mijozning user_id sini topamiz
+  cursor.execute("SELECT user_id FROM orders WHERE id = ?", (order_id,))
+  row = cursor.fetchone()
+  conn.close()
+
+  await courier_bot.answer_callback_query(
+      call.id, "Buyurtma qabul qilindi! Yo'lga chiqing."
+  )
+  await courier_bot.edit_message_reply_markup(
+      call.message.chat.id, call.message.message_id, reply_markup=None
+  )
+  await courier_bot.send_message(
+      call.message.chat.id,
+      f"✅ **#{order_id}**-sonli buyurtma muvaffaqiyatli qabul qilindi.",
+      parse_mode="Markdown",
+  )
+
+  # Mijozga xabar beramiz
+  if row:
+    try:
+      await bot.send_message(
+          row[0],
+          "🚚 Kuryerimiz buyurtmangizni qabul qildi va yo'lga chiqdi!",
+      )
+    except Exception as e:
+      print(f"Mijozga xabar berishda xatolik: {e}")
