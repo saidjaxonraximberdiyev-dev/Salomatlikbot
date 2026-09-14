@@ -3,31 +3,28 @@ import asyncio
 import sqlite3
 import threading
 from flask import Flask
-import telebot
 from telebot.async_telebot import AsyncTeleBot
 from telebot.types import (
     InlineKeyboardMarkup, InlineKeyboardButton, 
     ReplyKeyboardMarkup, KeyboardButton
 )
 
-# Render va environment parametrlarini sozlash
-TOKEN = os.environ.get("BOT_TOKEN", "8866529176:AAHywhFvrsn6XG1Ullu8VO1Ims1wmavfQT8")
-ADMIN_ID = int(os.environ.get("ADMIN_ID", "123456789"))  # Telegram ID raqamingizni yozing
+# --- BOT TOKEN VA ADMIN ID ---
+TOKEN = "8866529176:AAHywhFvrsn6XG1Ullu8VO1Ims1wmavfQT8"
+ADMIN_ID = 8866529176  # Agar Telegram raqamli ID'ingiz boshqacha bo'lsa, shu raqamni almashtiring
 
 bot = AsyncTeleBot(TOKEN)
-courier_bot = AsyncTeleBot(TOKEN)
-
 app = Flask('')
 
 @app.route('/')
 def home():
-    return "Salomatlik Bot Serveri Ishlamoqda!"
+    return "Salomatlik Bot Serveri Barqaror Ishlamoqda!"
 
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
 
-# --- MA'LUMOTLAR BAZASI (SQLite WAL mode) ---
+# --- MA'LUMOTLAR BAZASI ---
 def get_db():
     conn = sqlite3.connect('database.db')
     conn.execute("PRAGMA journal_mode=WAL;")
@@ -57,7 +54,14 @@ def init_db():
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS promocodes (
             code TEXT PRIMARY KEY,
-            discount INTEGER
+            prize TEXT
+        )
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS user_prizes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            prize TEXT
         )
     ''')
     conn.commit()
@@ -65,15 +69,19 @@ def init_db():
 
 init_db()
 
-# --- MENYULAR ---
-def get_main_menu():
+# --- INTERFEYS TUGMALARI (ADMIN UCHUN SARALANGAN) ---
+def get_main_menu(user_id):
     markup = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-    markup.add(
+    buttons = [
         KeyboardButton("🛍 Buyurtma berish"),
-        KeyboardButton("👤 Admin Paneli"),
         KeyboardButton("🔍 Kodni tekshirish"),
         KeyboardButton("🏆 Yutuqlarim")
-    )
+    ]
+    # Admin paneli FAQT ADMIN ga ko'rinadi
+    if user_id == ADMIN_ID:
+        buttons.append(KeyboardButton("👤 Admin Paneli"))
+        
+    markup.add(*buttons)
     return markup
 
 def get_courier_menu():
@@ -86,49 +94,80 @@ def get_courier_menu():
 
 user_states = {}
 
-# --- MIJOZ VA ASOSIY BOT HANDLERLARI ---
+# --- START VA ASOSIY MIJOZ MENYUSI ---
 @bot.message_handler(commands=['start'])
 async def send_welcome(message):
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("INSERT OR IGNORE INTO users (user_id, full_name) VALUES (?, ?)", 
+                   (message.from_user.id, message.from_user.full_name))
+    conn.commit()
+    conn.close()
+
     await bot.send_message(
         message.chat.id,
-        "Assalomu alaykum! Salomatlik markazi rasmiy botiga xush kelibsiz.",
-        reply_markup=get_main_menu()
+        f"Assalomu alaykum {message.from_user.first_name}! Salomatlik markazi rasmiy botiga xush kelibsiz.\n\nKerakli bo'limni tanlang:",
+        reply_markup=get_main_menu(message.from_user.id)
     )
 
+# --- BUYURTMA BERISH VA KATALOG ---
 @bot.message_handler(func=lambda msg: msg.text == "🛍 Buyurtma berish")
 async def start_order(message):
     kb = InlineKeyboardMarkup(row_width=1)
     kb.add(
         InlineKeyboardButton("💊 Maxsus -20% to'plam (Qora sedana + Omega 3)", callback_data="prod_maxsus"),
+        InlineKeyboardButton("🌿 Qora sedana yog'i (Tabbah)", callback_data="prod_sedana"),
         InlineKeyboardButton("📞 Mutaxassis maslahati kerak", callback_data="prod_consult")
     )
     await bot.send_message(
         message.chat.id,
-        "Sizga mutaxassis maslahati kerakmi yoki mahsulot bilan to'liq tanishmisiz?",
-        reply_markup=kb
+        "🛒 **Mahsulotlar katalogi:**\n\nKerakli mahsulotni tanlang yoki mutaxassis maslahatini oling:",
+        reply_markup=kb,
+        parse_mode="Markdown"
     )
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('prod_'))
 async def process_prod_choice(call):
-    prod_type = call.data
-    prod_name = "Maxsus -20% to'plam" if prod_type == "prod_maxsus" else "Mutaxassis maslahati"
+    products = {
+        "prod_maxsus": "Maxsus -20% to'plam (Qora sedana + Omega 3)",
+        "prod_sedana": "Qora sedana yog'i (Tabbah)",
+        "prod_consult": "Mutaxassis maslahati"
+    }
+    prod_name = products.get(call.data, "Salomatlik mahsuloti")
     
-    user_states[call.from_user.id] = {'product': prod_name}
+    user_states[call.from_user.id] = {'product': prod_name, 'step': 'phone'}
     await bot.answer_callback_query(call.id)
+    
+    kb = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+    kb.add(KeyboardButton("📱 Telefon raqamni yuborish", request_contact=True))
+    
     await bot.send_message(
         call.message.chat.id,
-        "Mutaxassisimiz sizga qo'ng'iroq qilishi uchun telefon raqamingizni yuboring (masalan: +998901234567):"
+        f"Siz **{prod_name}** ni tanladingiz.\n\nMutaxassisimiz bog'lanishi uchun **'📱 Telefon raqamni yuborish'** tugmasini bosing yoki raqamingizni yozib yuboring:",
+        reply_markup=kb,
+        parse_mode="Markdown"
     )
 
-@bot.message_handler(func=lambda msg: msg.from_user.id in user_states and 'phone' not in user_states[msg.from_user.id])
+@bot.message_handler(content_types=['text', 'contact'], func=lambda msg: msg.from_user.id in user_states and user_states[msg.from_user.id].get('step') == 'phone')
 async def process_phone(message):
-    user_states[message.from_user.id]['phone'] = message.text
+    if message.content_type == 'contact':
+        phone = message.contact.phone_number
+    else:
+        phone = message.text
+
+    user_states[message.from_user.id]['phone'] = phone
+    user_states[message.from_user.id]['step'] = 'location'
+    
+    kb = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+    kb.add(KeyboardButton("📍 Lokatsiyani yuborish", request_location=True))
+
     await bot.send_message(
         message.chat.id,
-        "Manzilingizni (Lokatsiya yoki matn ko'rinishida) yuboring:"
+        "Rahmat! Endi mahsulot yetkazib berilishi kerak bo'lgan manzilingizni (Lokatsiya yuboring yoki matn ko'rinishida yozing):",
+        reply_markup=kb
     )
 
-@bot.message_handler(content_types=['text', 'location'], func=lambda msg: msg.from_user.id in user_states and 'phone' in user_states[msg.from_user.id])
+@bot.message_handler(content_types=['text', 'location'], func=lambda msg: msg.from_user.id in user_states and user_states[msg.from_user.id].get('step') == 'location')
 async def process_location_and_save(message):
     user_data = user_states.pop(message.from_user.id, {})
     prod = user_data.get('product', 'Noma\'lum')
@@ -151,12 +190,12 @@ async def process_location_and_save(message):
 
     await bot.send_message(
         message.chat.id,
-        f"✅ So'rovingiz qabul qilindi! Mutaxassisimiz tez orada siz bilan bog'lanib bepul maslahat beradi.\n\n🆔 **Buyurtma ID:** #{order_id}",
+        f"✅ **Buyurtmangiz muvaffaqiyatli qabul qilindi!**\n\n🆔 **Buyurtma ID:** #{order_id}\n🛍 **Mahsulot:** {prod}\n\nTez orada operatorlarimiz siz bilan bog'lanishadi.",
         parse_mode="Markdown",
-        reply_markup=get_main_menu()
+        reply_markup=get_main_menu(message.from_user.id)
     )
 
-    # Operatorga yuborish
+    # Operator (Admin)ga xabarnoma yuborish
     op_kb = InlineKeyboardMarkup(row_width=2)
     op_kb.add(
         InlineKeyboardButton("⏳ Jarayonda", callback_data=f"op_process_{order_id}"),
@@ -167,8 +206,9 @@ async def process_location_and_save(message):
     try:
         await bot.send_message(
             ADMIN_ID,
-            f"📥 **YANGI BUYURTMA/MASLAHAT SO'ROVI!**\n\n"
+            f"📥 **YANGI BUYURTMA!**\n\n"
             f"📌 **ID:** #{order_id}\n"
+            f"👤 **Mijoz:** {message.from_user.full_name}\n"
             f"🛍 **Mahsulot:** {prod}\n"
             f"📞 **Tel:** {phone}\n"
             f"📍 **Manzil:** {loc_text}",
@@ -176,12 +216,69 @@ async def process_location_and_save(message):
             parse_mode="Markdown"
         )
     except Exception as e:
-        print(f"Operatorga yuborishda xatolik: {e}")
+        print(f"Operatorga xabar yuborishda xatolik: {e}")
 
+# --- KODNI TEKSHIRISH VA YUTUQLAR TIZIMI ---
+@bot.message_handler(func=lambda msg: msg.text == "🔍 Kodni tekshirish")
+async def start_check_code(message):
+    user_states[message.from_user.id] = {'step': 'promo'}
+    await bot.send_message(
+        message.chat.id,
+        "🏷 **Mahsulot qutisidagi promo-kodni kiriting:**\n(Masalan: WIN1002)",
+        parse_mode="Markdown"
+    )
+
+@bot.message_handler(func=lambda msg: msg.from_user.id in user_states and user_states[msg.from_user.id].get('step') == 'promo')
+async def process_promo_code(message):
+    code_entered = message.text.strip().upper()
+    user_states.pop(message.from_user.id, None)
+
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT prize FROM promocodes WHERE code = ?", (code_entered,))
+    row = cursor.fetchone()
+
+    if row:
+        prize = row[0]
+        cursor.execute("DELETE FROM promocodes WHERE code = ?", (code_entered,))
+        cursor.execute("INSERT INTO user_prizes (user_id, prize) VALUES (?, ?)", (message.from_user.id, prize))
+        conn.commit()
+        conn.close()
+        await bot.send_message(
+            message.chat.id,
+            f"🎉 **TABRIKLAYMIZ!**\n\nSiz kiritgan promo-kod bo'yicha yutuq: **{prize}**!\nYutuq parolingiz '🏆 Yutuqlarim' bo'limiga qo'shildi.",
+            parse_mode="Markdown"
+        )
+    else:
+        conn.close()
+        await bot.send_message(
+            message.chat.id,
+            "❌ **Xatolik!** Ushbu promo-kod mavjud emas yoki avval ishlatilgan.",
+            parse_mode="Markdown"
+        )
+
+@bot.message_handler(func=lambda msg: msg.text == "🏆 Yutuqlarim")
+async def show_my_prizes(message):
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT prize FROM user_prizes WHERE user_id = ?", (message.from_user.id,))
+    rows = cursor.fetchall()
+    conn.close()
+
+    if not rows:
+        await bot.send_message(message.chat.id, "🎁 Sizda hozircha yutuqlar mavjud emas.")
+        return
+
+    text = "🏆 **Sizning yutuqlaringiz:**\n\n"
+    for idx, r in enumerate(rows, 1):
+        text += f"{idx}. {r[0]}\n"
+    await bot.send_message(message.chat.id, text, parse_mode="Markdown")
+
+# --- ADMIN PANEL ---
 @bot.message_handler(func=lambda msg: msg.text == "👤 Admin Paneli")
 async def admin_panel(message):
     if message.from_user.id != ADMIN_ID:
-        await bot.send_message(message.chat.id, "Siz admin emassiz!")
+        await bot.send_message(message.chat.id, "⛔ Sizda admin huquqi yo'q!")
         return
     
     conn = get_db()
@@ -194,23 +291,15 @@ async def admin_panel(message):
 
     await bot.send_message(
         message.chat.id,
-        f"📊 **Admin Paneli**\n\n👥 Jami foydalanuvchilar: {total_users}\n📦 Jami buyurtmalar: {total_orders}",
+        f"📊 **ADMIN KABINETI**\n\n👥 Jami foydalanuvchilar: **{total_users} ta**\n📦 Jami buyurtmalar: **{total_orders} ta**\n\n🔐 Kuryer rejimini faollashtirish uchun: `/kuryer kuryer123` deb yozing.",
         parse_mode="Markdown"
     )
 
-@bot.message_handler(func=lambda msg: msg.text == "🔍 Kodni tekshirish")
-async def check_code(message):
-    await bot.send_message(message.chat.id, "Mahsulot qutisidagi promo-kodni kiriting:")
-
-@bot.message_handler(func=lambda msg: msg.text == "🏆 Yutuqlarim")
-async def my_prizes(message):
-    await bot.send_message(message.chat.id, "🎁 Sizda hozircha yutuqlar mavjud emas.")
-
-# --- OPERATOR TUGMALARI LOGIKASI ---
+# --- OPERATOR TUGMALARI UCHUN HANDLERLAR ---
 @bot.callback_query_handler(func=lambda call: call.data.startswith('op_'))
 async def operator_action(call):
     data_parts = call.data.split('_')
-    action = data_parts[1]
+    action = data_parts[1] 
     try:
         order_id = int(data_parts[2])
     except (IndexError, ValueError):
@@ -223,12 +312,11 @@ async def operator_action(call):
     if action == 'confirm':
         cursor.execute("UPDATE orders SET status = 'Tasdiqlandi (Kuryerga yuborildi)' WHERE id = ?", (order_id,))
         conn.commit()
-        
         cursor.execute("SELECT product, phone, location FROM orders WHERE id = ?", (order_id,))
         order_info = cursor.fetchone()
         conn.close()
         
-        await bot.answer_callback_query(call.id, "Buyurtma tasdiqlandi!")
+        await bot.answer_callback_query(call.id, "Buyurtma tasdiqlandi va Kuryerga yuborildi!")
         await bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=None)
         await bot.send_message(call.message.chat.id, f"✅ #{order_id}-sonli buyurtma tasdiqlandi va kuryerga yuborildi.")
         
@@ -237,13 +325,9 @@ async def operator_action(call):
             courier_kb = InlineKeyboardMarkup()
             courier_kb.add(InlineKeyboardButton("📥 Qabul qilish", callback_data=f"accept_{order_id}"))
             try:
-                await courier_bot.send_message(
+                await bot.send_message(
                     ADMIN_ID,
-                    f"📦 **YANGI BUYURTMA (Maslahatdan so'ng)!**\n\n"
-                    f"📌 **ID:** #{order_id}\n"
-                    f"🛍 **Mahsulot:** {prod}\n"
-                    f"📞 **Tel:** {phone}\n"
-                    f"📍 **Manzil:** {loc}",
+                    f"📦 **KURYER UCHUN YANGI BUYURTMA!**\n\n📌 **ID:** #{order_id}\n🛍 **Mahsulot:** {prod}\n📞 **Tel:** {phone}\n📍 **Manzil:** {loc}",
                     reply_markup=courier_kb,
                     parse_mode="Markdown"
                 )
@@ -260,11 +344,9 @@ async def operator_action(call):
             InlineKeyboardButton("✅ Tasdiqlash", callback_data=f"op_confirm_{order_id}"),
             InlineKeyboardButton("❌ Bekor qilish", callback_data=f"op_cancel_{order_id}")
         )
-        
         await bot.answer_callback_query(call.id, "Mijoz bilan suhbatlashilmoqda...")
         await bot.edit_message_text(
-            f"⏳ **ID #{order_id}** — Jarayonda (Mijoz bilan suhbatlashilmoqda)\n"
-            f"Sotib olsa 'Tasdiqlash', olmasa 'Bekor qilish' tugmasini bosing.", 
+            f"⏳ **ID #{order_id}** — Jarayonda (Mijoz bilan suhbatlashilmoqda)", 
             call.message.chat.id, 
             call.message.message_id, 
             reply_markup=kb, 
@@ -278,32 +360,32 @@ async def operator_action(call):
         await bot.answer_callback_query(call.id, "Buyurtma bekor qilindi.")
         await bot.edit_message_text(f"❌ **ID #{order_id}** — Bekor qilindi", call.message.chat.id, call.message.message_id, parse_mode="Markdown")
 
-# --- KURYER BOT QISMI VA SIRLI /kuryer LOGINI ---
-@courier_bot.message_handler(commands=['kuryer'])
+# --- KURYER TIZIMI ---
+@bot.message_handler(commands=['kuryer'])
 async def courier_secret_login(message):
     args = message.text.split()
     SECRET_PASSWORD = "kuryer123"
     
     if len(args) > 1 and args[1] == SECRET_PASSWORD:
-        await courier_bot.send_message(
+        await bot.send_message(
             message.chat.id,
-            "✅ **Maxfiy parol tasdiqlandi!**\nKuryer paneli ochildi.",
+            "✅ **Maxfiy parol tasdiqlandi!**\nKuryer paneli faollashtirildi.",
             parse_mode="Markdown",
             reply_markup=get_courier_menu()
         )
     else:
-        await courier_bot.send_message(
+        await bot.send_message(
             message.chat.id,
             "🔐 Kuryer panelini ochish uchun parolni kiriting:\n\n**Namuna:** `/kuryer kuryer123`",
             parse_mode="Markdown"
         )
 
-@courier_bot.callback_query_handler(func=lambda call: call.data.startswith('accept_'))
+@bot.callback_query_handler(func=lambda call: call.data.startswith('accept_'))
 async def courier_accept_order(call):
     try:
         order_id = int(call.data.split("_")[1])
     except (IndexError, ValueError):
-        await courier_bot.answer_callback_query(call.id, "Xatolik yuz berdi!")
+        await bot.answer_callback_query(call.id, "Xatolik yuz berdi!")
         return
 
     conn = get_db()
@@ -315,16 +397,16 @@ async def courier_accept_order(call):
     kb = InlineKeyboardMarkup()
     kb.add(InlineKeyboardButton("🚚 Yo'ldaman", callback_data=f"ontheway_{order_id}"))
 
-    await courier_bot.answer_callback_query(call.id, "Buyurtma qabul qilindi!")
-    await courier_bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=kb)
-    await courier_bot.send_message(call.message.chat.id, f"✅ **#{order_id}**-sonli buyurtma qabul qilindi. Yo'lga chiqish uchun 'Yo\\'ldaman' tugmasini bosing.", parse_mode="Markdown")
+    await bot.answer_callback_query(call.id, "Buyurtma qabul qilindi!")
+    await bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=kb)
+    await bot.send_message(call.message.chat.id, f"✅ **#{order_id}**-sonli buyurtma qabul qilindi. Yo'lga chiqish uchun 'Yo\\'ldaman' tugmasini bosing.", parse_mode="Markdown")
 
-@courier_bot.callback_query_handler(func=lambda call: call.data.startswith('ontheway_'))
+@bot.callback_query_handler(func=lambda call: call.data.startswith('ontheway_'))
 async def courier_on_the_way(call):
     try:
         order_id = int(call.data.split("_")[1])
     except (IndexError, ValueError):
-        await courier_bot.answer_callback_query(call.id, "Xatolik yuz berdi!")
+        await bot.answer_callback_query(call.id, "Xatolik yuz berdi!")
         return
 
     conn = get_db()
@@ -338,9 +420,9 @@ async def courier_on_the_way(call):
     kb = InlineKeyboardMarkup()
     kb.add(InlineKeyboardButton("✅ Yetkazildi", callback_data=f"deliver_{order_id}"))
 
-    await courier_bot.answer_callback_query(call.id, "Holat: Yo'lda")
-    await courier_bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=kb)
-    await courier_bot.send_message(call.message.chat.id, f"🚚 **#{order_id}** — Yo'ldasiz. Manzilga yetib borgach 'Yetkazildi' tugmasini bosing.", parse_mode="Markdown")
+    await bot.answer_callback_query(call.id, "Holat: Yo'lda")
+    await bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=kb)
+    await bot.send_message(call.message.chat.id, f"🚚 **#{order_id}** — Yo'ldasiz. Manzilga yetib borgach 'Yetkazildi' tugmasini bosing.", parse_mode="Markdown")
 
     if row:
         try:
@@ -348,7 +430,7 @@ async def courier_on_the_way(call):
         except Exception as e:
             print(f"Mijozga xabar berishda xatolik: {e}")
 
-@courier_bot.message_handler(func=lambda msg: msg.text == "🚚 Yo'ldagi buyurtmalarim")
+@bot.message_handler(func=lambda msg: msg.text == "🚚 Yo'ldagi buyurtmalarim")
 async def courier_on_the_way_orders(message):
     conn = get_db()
     cursor = conn.cursor()
@@ -357,7 +439,7 @@ async def courier_on_the_way_orders(message):
     conn.close()
 
     if not rows:
-        await courier_bot.send_message(message.chat.id, "𭭜 Sizda hozirda yo'ldagi buyurtmalar yo'q.")
+        await bot.send_message(message.chat.id, "📭 Sizda hozirda yo'ldagi buyurtmalar yo'q.")
         return
 
     for o_id, prod, phone, loc, status in rows:
@@ -368,9 +450,9 @@ async def courier_on_the_way_orders(message):
             kb.add(InlineKeyboardButton("✅ Yetkazildi", callback_data=f"deliver_{o_id}"))
         
         text = f"📦 **Buyurtma #{o_id}**\nStatus: {status}\n🛍 Mahsulot: {prod}\n📞 Tel: {phone}\n📍 Manzil: {loc}"
-        await courier_bot.send_message(message.chat.id, text, reply_markup=kb, parse_mode="Markdown")
+        await bot.send_message(message.chat.id, text, reply_markup=kb, parse_mode="Markdown")
 
-@courier_bot.message_handler(func=lambda msg: msg.text == "✅ Yetkazilganlar")
+@bot.message_handler(func=lambda msg: msg.text == "✅ Yetkazilganlar")
 async def courier_delivered_orders(message):
     conn = get_db()
     cursor = conn.cursor()
@@ -379,20 +461,20 @@ async def courier_delivered_orders(message):
     conn.close()
 
     if not rows:
-        await courier_bot.send_message(message.chat.id, "📦 Hali yetkazilgan buyurtmalar yo'q.")
+        await bot.send_message(message.chat.id, "📦 Hali yetkazilgan buyurtmalar yo'q.")
         return
 
     text = "✅ **Yetkazilgan oxirgi buyurtmalaringiz:**\n\n"
     for o_id, prod, phone, loc in rows:
         text += f"📌 **ID #{o_id}**\n🛍 {prod}\n📞 Tel: {phone}\n---\n"
-    await courier_bot.send_message(message.chat.id, text, parse_mode="Markdown")
+    await bot.send_message(message.chat.id, text, parse_mode="Markdown")
 
-@courier_bot.callback_query_handler(func=lambda call: call.data.startswith('deliver_'))
+@bot.callback_query_handler(func=lambda call: call.data.startswith('deliver_'))
 async def courier_mark_delivered(call):
     try:
         order_id = int(call.data.split("_")[1])
     except (IndexError, ValueError):
-        await courier_bot.answer_callback_query(call.id, "Xatolik yuz berdi!")
+        await bot.answer_callback_query(call.id, "Xatolik yuz berdi!")
         return
 
     conn = get_db()
@@ -403,9 +485,9 @@ async def courier_mark_delivered(call):
     conn.commit()
     conn.close()
 
-    await courier_bot.answer_callback_query(call.id, "Buyurtma yetkazildi!")
-    await courier_bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=None)
-    await courier_bot.send_message(call.message.chat.id, f"🎉 **#{order_id}**-sonli buyurtma yetkazildi va Yetkazilganlar bo'limiga qo'shildi!", parse_mode="Markdown")
+    await bot.answer_callback_query(call.id, "Buyurtma yetkazildi!")
+    await bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=None)
+    await bot.send_message(call.message.chat.id, f"🎉 **#{order_id}**-sonli buyurtma yetkazildi!", parse_mode="Markdown")
 
     if row:
         try:
@@ -413,16 +495,13 @@ async def courier_mark_delivered(call):
         except Exception as e:
             print(f"Mijozga xabar berishda xatolik: {e}")
 
-# --- ASOSIY ISHGA TUSHIRISH ---
+# --- ISHGA TUSHIRISH ---
 async def main():
     t = threading.Thread(target=run_flask)
     t.daemon = True
     t.start()
     
-    await asyncio.gather(
-        bot.infinity_polling(),
-        courier_bot.infinity_polling()
-    )
+    await bot.infinity_polling()
 
 if __name__ == '__main__':
     asyncio.run(main())
