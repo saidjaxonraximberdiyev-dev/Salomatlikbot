@@ -276,6 +276,61 @@ async def show_operator_sales(call):
     await bot.answer_callback_query(call.id)
     await bot.edit_message_text(text, call.message.chat.id, call.message.message_id, parse_mode="Markdown")
 
+# --- OPERATOR TUGMALARI HODISALARI ---
+@bot.callback_query_handler(func=lambda call: call.data.startswith('op_'))
+async def handle_operator_actions(call):
+    parts = call.data.split("_")
+    action = parts[1]
+    order_id = int(parts[2])
+
+    conn = get_db()
+    cursor = conn.cursor()
+
+    if action == "confirm":
+        cursor.execute("UPDATE orders SET status = 'Tasdiqlandi', operator_id = ? WHERE id = ?", (call.from_user.id, order_id))
+        conn.commit()
+
+        cursor.execute("SELECT product, phone, location FROM orders WHERE id = ?", (order_id,))
+        row = cursor.fetchone()
+        conn.close()
+
+        await bot.answer_callback_query(call.id, "Buyurtma tasdiqlandi!")
+        await bot.edit_message_text(f"✅ **#{order_id}-sonli buyurtma tasdiqlandi va kuryerga yuborildi!**", call.message.chat.id, call.message.message_id, parse_mode="Markdown")
+
+        if row:
+            prod, phone, loc = row
+            courier_kb = InlineKeyboardMarkup()
+            courier_kb.add(InlineKeyboardButton("📥 Qabul qilish", callback_data=f"accept_{order_id}"))
+            try:
+                await courier_bot.send_message(
+                    ADMIN_ID,
+                    f"📦 **KURYER UCHUN YANGI BUYURTMA!**\n\n📌 **ID:** #{order_id}\n🛍 **Mahsulot:** {prod}\n📞 **Tel:** {phone}\n📍 **Manzil:** {loc}",
+                    reply_markup=courier_kb,
+                    parse_mode="Markdown"
+                )
+            except Exception as e:
+                print(f"Kuryerga yuborishda xatolik: {e}")
+
+    elif action == "process":
+        cursor.execute("UPDATE orders SET status = 'Jarayonda', operator_id = ? WHERE id = ?", (call.from_user.id, order_id))
+        conn.commit()
+        conn.close()
+        
+        await bot.answer_callback_query(call.id, "Buyurtma jarayonga o'tkazildi.")
+        kb = InlineKeyboardMarkup(row_width=1)
+        kb.add(
+            InlineKeyboardButton("✅ Tasdiqlash (Kuryerga yuborish)", callback_data=f"op_confirm_{order_id}"),
+            InlineKeyboardButton("❌ Bekor qilish", callback_data=f"op_cancel_{order_id}")
+        )
+        await bot.edit_message_text(f"⏳ **#{order_id}-sonli buyurtma:** Jarayonda...", call.message.chat.id, call.message.message_id, reply_markup=kb, parse_mode="Markdown")
+
+    elif action == "cancel":
+        cursor.execute("UPDATE orders SET status = 'Bekor qilindi' WHERE id = ?", (order_id,))
+        conn.commit()
+        conn.close()
+        await bot.answer_callback_query(call.id, "Buyurtma bekor qilindi.")
+        await bot.edit_message_text(f"❌ **#{order_id}-sonli buyurtma bekor qilindi.**", call.message.chat.id, call.message.message_id, parse_mode="Markdown")
+
 @bot.message_handler(func=lambda msg: msg.text == "🏆 Yutuqlarim")
 async def show_my_prizes(message):
     conn = get_db()
@@ -494,6 +549,115 @@ async def complete_order(message, user_id, location_data):
         print(f"Kuryer botiga yuborishda xatolik: {e}")
 
     user_states.pop(user_id, None)
+
+# --- KURYER BOTI HODISALARI (COURIER_BOT) ---
+@courier_bot.message_handler(commands=["start"])
+async def courier_start(message):
+    await courier_bot.send_message(
+        message.chat.id,
+        "🚚 **Kuryer botiga xush kelibsiz!**",
+        reply_markup=get_courier_menu()
+    )
+
+@courier_bot.callback_query_handler(func=lambda call: call.data.startswith('accept_'))
+async def courier_accept(call):
+    order_id = int(call.data.split("_")[1])
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("UPDATE orders SET status = 'Qabul qilindi', courier_id = ? WHERE id = ?", (call.from_user.id, order_id))
+    conn.commit()
+    conn.close()
+
+    kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton("🚚 Yo'ldaman", callback_data=f"ontheway_{order_id}"))
+
+    await courier_bot.answer_callback_query(call.id, "Buyurtma qabul qilindi!")
+    await courier_bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=kb)
+    await courier_bot.send_message(call.message.chat.id, f"✅ **#{order_id}**-sonli buyurtma qabul qilindi. Yo'lga chiqishda 'Yo\\'ldaman' tugmasini bosing.", parse_mode="Markdown")
+
+@courier_bot.callback_query_handler(func=lambda call: call.data.startswith('ontheway_'))
+async def courier_ontheway(call):
+    order_id = int(call.data.split("_")[1])
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("UPDATE orders SET status = 'Yo''lda' WHERE id = ?", (order_id,))
+    cursor.execute("SELECT user_id FROM orders WHERE id = ?", (order_id,))
+    row = cursor.fetchone()
+    conn.commit()
+    conn.close()
+
+    kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton("✅ Yetkazildi", callback_data=f"deliver_{order_id}"))
+
+    await courier_bot.answer_callback_query(call.id, "Holat: Yo'lda")
+    await courier_bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=kb)
+    await courier_bot.send_message(call.message.chat.id, f"🚚 **#{order_id}** — Yo'ldasiz.", parse_mode="Markdown")
+
+    if row:
+        try:
+            await bot.send_message(row[0], "🚚 Kuryerimiz buyurtmangizni olib yo'lga chiqdi!")
+        except Exception as e:
+            print(f"Mijozga xabar berishda xatolik: {e}")
+
+@courier_bot.callback_query_handler(func=lambda call: call.data.startswith('deliver_'))
+async def courier_deliver(call):
+    order_id = int(call.data.split("_")[1])
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("UPDATE orders SET status = 'Yetkazildi' WHERE id = ?", (order_id,))
+    cursor.execute("SELECT user_id FROM orders WHERE id = ?", (order_id,))
+    row = cursor.fetchone()
+    conn.commit()
+    conn.close()
+
+    await courier_bot.answer_callback_query(call.id, "Buyurtma yetkazildi!")
+    await courier_bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=None)
+    await courier_bot.send_message(call.message.chat.id, f"🎉 **#{order_id}**-sonli buyurtma yetkazildi!", parse_mode="Markdown")
+
+    if row:
+        try:
+            await bot.send_message(row[0], "🎉 Buyurtmangiz muvaffaqiyatli yetkazildi! Xaridingiz uchun rahmat!")
+        except Exception as e:
+            print(f"Mijozga xabar berishda xatolik: {e}")
+
+@courier_bot.message_handler(func=lambda msg: msg.text == "🚚 Yo'ldagi buyurtmalarim")
+async def courier_on_the_way_orders(message):
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, product, phone, location, status FROM orders WHERE courier_id = ? AND status IN ('Qabul qilindi', 'Yo''lda')", (message.from_user.id,))
+    rows = cursor.fetchall()
+    conn.close()
+
+    if not rows:
+        await courier_bot.send_message(message.chat.id, "📭 Sizda hozirda yo'ldagi buyurtmalar yo'q.")
+        return
+
+    for o_id, prod, phone, loc, status in rows:
+        kb = InlineKeyboardMarkup()
+        if status == 'Qabul qilindi':
+            kb.add(InlineKeyboardButton("🚚 Yo'ldaman", callback_data=f"ontheway_{o_id}"))
+        else:
+            kb.add(InlineKeyboardButton("✅ Yetkazildi", callback_data=f"deliver_{o_id}"))
+        
+        text = f"📦 **Buyurtma #{o_id}**\nStatus: {status}\n🛍 Mahsulot: {prod}\n📞 Tel: {phone}\n📍 Manzil: {loc}"
+        await courier_bot.send_message(message.chat.id, text, reply_markup=kb, parse_mode="Markdown")
+
+@courier_bot.message_handler(func=lambda msg: msg.text == "✅ Yetkazilganlar")
+async def courier_delivered_orders(message):
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, product, phone, location FROM orders WHERE courier_id = ? AND status = 'Yetkazildi' ORDER BY id DESC LIMIT 10", (message.from_user.id,))
+    rows = cursor.fetchall()
+    conn.close()
+
+    if not rows:
+        await courier_bot.send_message(message.chat.id, "📦 Hali yetkazilgan buyurtmalar yo'q.")
+        return
+
+    text = "✅ **Yetkazilgan oxirgi buyurtmalaringiz:**\n\n"
+    for o_id, prod, phone, loc in rows:
+        text += f"📌 **ID #{o_id}**\n🛍 {prod}\n📞 Tel: {phone}\n---\n"
+    await courier_bot.send_message(message.chat.id, text, parse_mode="Markdown")
 
 # --- BOTLARNI ISHGA TUSHIRISH ---
 async def main():
