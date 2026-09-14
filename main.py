@@ -314,15 +314,41 @@ async def handle_operator_actions(call):
     elif action == "process":
         cursor.execute("UPDATE orders SET status = 'Jarayonda', operator_id = ? WHERE id = ?", (call.from_user.id, order_id))
         conn.commit()
+
+        cursor.execute("SELECT product, phone, location, user_id FROM orders WHERE id = ?", (order_id,))
+        order_row = cursor.fetchone()
+
+        client_name = "Noma'lum"
+        if order_row and order_row[3]:
+            cursor.execute("SELECT full_name FROM users WHERE user_id = ?", (order_row[3],))
+            u_row = cursor.fetchone()
+            if u_row and u_row[0]:
+                client_name = u_row[0]
+
         conn.close()
-        
+
         await bot.answer_callback_query(call.id, "Buyurtma jarayonga o'tkazildi.")
+
+        if order_row:
+            prod, phone, loc, _ = order_row
+            text = (
+                f"📞 **MUTAXASSIS MASLAHATI SO'ROVI! (JARAYONDA)**\n\n"
+                f"📌 **ID:** #{order_id}\n"
+                f"🛍 **Mahsulot:** {prod}\n"
+                f"👤 **Mijoz:** {client_name}\n"
+                f"📞 **Tel:** {phone}\n"
+                f"📍 **Manzil:** {loc}\n"
+                f"📊 **Holat:** ⏳ Jarayonda"
+            )
+        else:
+            text = f"⏳ **#{order_id}-sonli buyurtma:** Jarayonda..."
+
         kb = InlineKeyboardMarkup(row_width=1)
         kb.add(
             InlineKeyboardButton("✅ Tasdiqlash (Kuryerga yuborish)", callback_data=f"op_confirm_{order_id}"),
             InlineKeyboardButton("❌ Bekor qilish", callback_data=f"op_cancel_{order_id}")
         )
-        await bot.edit_message_text(f"⏳ **#{order_id}-sonli buyurtma:** Jarayonda...", call.message.chat.id, call.message.message_id, reply_markup=kb, parse_mode="Markdown")
+        await bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=kb, parse_mode="Markdown")
 
     elif action == "cancel":
         cursor.execute("UPDATE orders SET status = 'Bekor qilindi' WHERE id = ?", (order_id,))
