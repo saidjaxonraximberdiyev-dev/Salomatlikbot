@@ -17,14 +17,6 @@ def run_web():
 
 # Veb-serverni alohida oqimda ishga tushiramiz
 Thread(target=run_web).start()
-killall -9 python python3 2>/dev/null; pkill -9 -f python
-
-cat << 'EOF' > main.py
-import asyncio
-import sqlite3
-from telebot.async_telebot import AsyncTeleBot
-from telebot.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
-
 BOT_TOKEN = "8866529176:AAHywhFvrsn6XG1Ullu8VO1Ims1wmavfQT8"
 COURIER_BOT_TOKEN = "8925703420:AAFQrXlAE0wD760H_TBr-A5SJWhA5NXuXT0"
 ADMIN_ID = 786394206
