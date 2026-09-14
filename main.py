@@ -1,22 +1,26 @@
 import os
+import asyncio
+import sqlite3
 from threading import Thread
 from flask import Flask
+from telebot.async_telebot import AsyncTeleBot
+from telebot.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 
+# --- FLASK VEB-SERVER (PORT UCHUN) ---
 app = Flask('')
-
 
 @app.route('/')
 def home():
-  return "Bot ishlayapti!"
-
+    return "Bot ishlayapti!"
 
 def run_web():
-  port = int(os.environ.get('PORT', 10000))
-  app.run(host='0.0.0.0', port=port)
-
+    port = int(os.environ.get('PORT', 10000))
+    app.run(host='0.0.0.0', port=port)
 
 # Veb-serverni alohida oqimda ishga tushiramiz
-Thread(target=run_web).start()
+Thread(target=run_web, daemon=True).start()
+
+# --- BOT SOZLAMALARI ---
 BOT_TOKEN = "8866529176:AAHywhFvrsn6XG1Ullu8VO1Ims1wmavfQT8"
 COURIER_BOT_TOKEN = "8925703420:AAFQrXlAE0wD760H_TBr-A5SJWhA5NXuXT0"
 ADMIN_ID = 786394206
@@ -463,10 +467,13 @@ async def complete_advice_order(message, user_id, location_data):
 
 async def complete_order(message, user_id, location_data):
     user_data = user_states.get(user_id, {})
+    prod = user_data.get("product", "Noma'lum")
+    phone = user_data.get("phone", "Noma'lum")
+
     conn = get_db()
     cursor = conn.cursor()
     cursor.execute("INSERT INTO orders (user_id, product, phone, location, status, courier_id, operator_id) VALUES (?, ?, ?, ?, 'Kutilmoqda', NULL, NULL)",
-                   (user_id, user_data.get("product"), user_data.get("phone"), location_data))
+                   (user_id, prod, phone, location_data))
     order_id = cursor.lastrowid
     conn.commit()
     conn.close()
@@ -477,4 +484,24 @@ async def complete_order(message, user_id, location_data):
     courier_kb.add(InlineKeyboardButton("📥 Qabul qilish", callback_data=f"accept_{order_id}"))
     
     try:
-        awa
+        await courier_bot.send_message(
+            ADMIN_ID,
+            f"📦 **YANGI BUYURTMA!**\n\n📌 **ID:** #{order_id}\n🛍 **Mahsulot:** {prod}\n📞 **Tel:** {phone}\n📍 **Manzil:** {location_data}",
+            reply_markup=courier_kb,
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        print(f"Kuryer botiga yuborishda xatolik: {e}")
+
+    user_states.pop(user_id, None)
+
+# --- BOTLARNI ISHGA TUSHIRISH ---
+async def main():
+    init_db()
+    await asyncio.gather(
+        bot.infinity_polling(),
+        courier_bot.infinity_polling()
+    )
+
+if __name__ == "__main__":
+    asyncio.run(main())
